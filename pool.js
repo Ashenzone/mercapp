@@ -1,12 +1,2 @@
-const { Pool } = require('pg');
+ const { Pool } = require('pg'); const url = process.env.DATABASE_URL || ''; const isLocal = /localhost|127\.0\.0\.1/.test(url); const pool = new Pool({ connectionString: url, ssl: url && !isLocal ? { rejectUnauthorized: false } : false, }); module.exports = { pool };
 
-// No Railway a variavel DATABASE_URL ja vem pronta.
-// Local, defina no .env (veja .env.example).
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway')
-    ? { rejectUnauthorized: false }
-    : false,
-});
-
-module.exports = { pool };
