@@ -15,7 +15,6 @@
         <h1>Dashboard</h1>
         <div class="sub" id="nome-empresa">Visao geral da sua empresa.</div>
       </div>
-      <button class="btn secondary" id="btn-tick">Forcar novo ciclo de mercado</button>
     </div>
 
     <div class="kpis" id="kpis"></div>
@@ -87,9 +86,6 @@ async function carregarEventos() {
     </div>`).join('');
 }
 
-document.getElementById('btn-tick').addEventListener('click', async () => {
-  toast('Rodando ciclo de mercado...');
-  await fetch(`${API}/simulation/tick`, { method: 'POST' });
   toast('Ciclo concluido.');
   init();
 });

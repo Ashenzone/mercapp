@@ -22,25 +22,25 @@ router.get('/empresa/:companyId', async (req, res) => {
 
     const [vendasPorDia, resumoPedidos, resumoCampanhas, produtos] = await Promise.all([
       pool.query(
-        `SELECT date_trunc('day', created_at) AS dia, COUNT(*) AS vendas, SUM(price_cents) AS receita_cents
+        `SELECT date_trunc('day', created_at) AS dia, COUNT(*) AS vendas, SUM(price_cents)::bigint AS receita_cents
          FROM orders WHERE company_id = $1 ${filtroSql}
          GROUP BY 1 ORDER BY 1`,
         [companyId]
       ),
       pool.query(
-        `SELECT COUNT(*) AS total_vendas, COALESCE(SUM(price_cents),0) AS receita_cents
+        `SELECT COUNT(*) AS total_vendas, COALESCE(SUM(price_cents)::bigint,0) AS receita_cents
          FROM orders WHERE company_id = $1 ${filtroSql}`,
         [companyId]
       ),
       pool.query(
-        `SELECT COALESCE(SUM(impressions),0) AS impressions, COALESCE(SUM(clicks),0) AS clicks,
-                COALESCE(SUM(spent_cents),0) AS spent_cents
+        `SELECT COALESCE(SUM(impressions)::bigint,0) AS impressions, COALESCE(SUM(clicks)::bigint,0) AS clicks,
+                COALESCE(SUM(spent_cents)::bigint,0) AS spent_cents
          FROM campaigns WHERE company_id = $1`,
         [companyId]
       ),
       pool.query(
         `SELECT p.id, p.name, p.views_count, p.sales_count, p.rating_avg, p.price_cents, p.cost_cents,
-                (p.price_cents - p.cost_cents) * p.sales_count AS lucro_estimado_cents
+                (p.price_cents - p.cost_cents)::bigint * p.sales_count AS lucro_estimado_cents
          FROM products p WHERE p.company_id = $1 ORDER BY p.sales_count DESC`,
         [companyId]
       ),

@@ -109,7 +109,7 @@ router.post('/', async (req, res) => {
     const {
       company_id, name, category_id, description, product_type,
       niche, keywords, target_audience, price, cost,
-      stock_quantity, cover_image_url, status,
+      stock_quantity, cover_image_url, status, currency_code,
     } = req.body;
 
     if (!company_id || !name || price === undefined) {
@@ -124,14 +124,14 @@ router.post('/', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO products
         (company_id, name, category_id, description, product_type, niche, keywords,
-         target_audience, price_cents, cost_cents, stock_quantity, cover_image_url, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         target_audience, price_cents, cost_cents, stock_quantity, cover_image_url, status, currency_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING *`,
       [
         company_id, name, category_id || null, description || null, tipo, niche || null,
         keywordsArr, target_audience || null, paraCentavos(price), paraCentavos(cost || 0),
         stock_quantity === '' || stock_quantity === undefined ? null : Number(stock_quantity),
-        cover_image_url || null, statusFinal,
+        cover_image_url || null, statusFinal, currency_code || 'BRL',
       ]
     );
     res.status(201).json(rows[0]);
@@ -184,6 +184,81 @@ router.put('/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ erro: 'Erro ao editar produto.' });
+  }
+});
+
+// POST /api/products/:id/comprar -> jogador compra o produto de outra empresa
+router.post('/:id/comprar', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { company_id, user_id } = req.body; // empresa do COMPRADOR
+    if (!company_id) return res.status(400).json({ erro: 'company_id e obrigatorio.' });
+
+    await client.query('BEGIN');
+    const prod = await client.query(
+      `SELECT p.*, c.rate_to_brl, c.import_tax_pct
+       FROM products p LEFT JOIN currencies c ON c.code = p.currency_code
+       WHERE p.id = $1 FOR UPDATE OF p`,
+      [req.params.id]
+    );
+    if (prod.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ erro: 'Produto nao encontrado.' });
+    }
+    const p = prod.rows[0];
+    if (p.company_id === company_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ erro: 'Voce nao pode comprar o proprio produto.' });
+    }
+    if (p.status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ erro: 'Produto indisponivel.' });
+    }
+    if (p.stock_quantity !== null && p.stock_quantity <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ erro: 'Produto esgotado.' });
+    }
+
+    const precoBrl = Math.round(p.price_cents * Number(p.rate_to_brl || 1));
+    const imposto = Math.round(precoBrl * Number(p.import_tax_pct || 0) / 100);
+
+    const comprador = await client.query(
+      'SELECT balance_cents FROM companies WHERE id = $1 FOR UPDATE',
+      [company_id]
+    );
+    if (comprador.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ erro: 'Empresa compradora nao encontrada.' });
+    }
+    if (Number(comprador.rows[0].balance_cents) < precoBrl) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ erro: 'Saldo insuficiente para essa compra.' });
+    }
+
+    // comprador paga, vendedor recebe liquido (taxa da plataforma sai da economia)
+    const liquido = Math.round(precoBrl * 0.92) - imposto;
+    await client.query('UPDATE companies SET balance_cents = balance_cents - $1 WHERE id = $2', [precoBrl, company_id]);
+    await client.query('UPDATE companies SET balance_cents = balance_cents + $1 WHERE id = $2', [liquido, p.company_id]);
+    await client.query(
+      `INSERT INTO orders (product_id, company_id, user_id, price_cents, source, currency_code, tax_cents)
+       VALUES ($1,$2,$3,$4,'jogador',$5,$6)`,
+      [p.id, p.company_id, user_id || null, precoBrl, p.currency_code || 'BRL', imposto]
+    );
+    await client.query(
+      `UPDATE products SET sales_count = sales_count + 1,
+         stock_quantity = CASE WHEN stock_quantity IS NULL THEN NULL ELSE GREATEST(0, stock_quantity - 1) END
+       WHERE id = $1`,
+      [p.id]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ ok: true, pago_cents: precoBrl });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ erro: 'Erro ao comprar produto.' });
+  } finally {
+    client.release();
   }
 });
 

@@ -54,6 +54,12 @@
       </div>
 
       <div class="field">
+        <label>Moeda / mercado</label>
+        <select name="currency_code" id="currency_code"></select>
+        <div class="hint">Vender fora do Brasil aumenta a procura, mas paga imposto de importacao.</div>
+      </div>
+
+      <div class="field">
         <label>Custo de producao (R$)</label>
         <input name="cost" type="number" step="0.01" min="0" placeholder="0.00">
         <div class="hint">Usado para calcular sua margem/lucro nos relatorios.</div>
@@ -80,8 +86,13 @@
       </div>
 
       <div class="field">
-        <label>Imagem de capa (URL)</label>
-        <input name="cover_image_url" type="url" placeholder="https://...">
+        <label>Imagem de capa</label>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <div id="preview-capa" class="cover" style="width:80px;height:60px;border-radius:6px;border:1px solid var(--line);background-size:cover;background-position:center;font-size:10px;">sem capa</div>
+          <input id="file-capa" type="file" accept="image/*">
+        </div>
+        <input name="cover_image_url" type="hidden">
+        <div class="hint">Do computador ou da galeria do celular.</div>
       </div>
 
       <div class="field">
@@ -106,6 +117,18 @@
 <script>
 const idEdicao = new URLSearchParams(location.search).get('id');
 const form = document.getElementById('form-produto');
+
+async function carregarMoedas() {
+  const resp = await fetch(`${API}/financas/moedas`);
+  const moedas = await resp.json();
+  const sel = document.getElementById('currency_code');
+  moedas.forEach((m) => {
+    const o = document.createElement('option');
+    o.value = m.code;
+    o.textContent = `${m.name} — imposto ${Number(m.import_tax_pct).toFixed(0)}%`;
+    sel.appendChild(o);
+  });
+}
 
 async function carregarCategorias() {
   const resp = await fetch(`${API}/categories`);
@@ -136,7 +159,13 @@ async function carregarParaEdicao() {
   form.keywords.value = (p.keywords || []).join(', ');
   form.stock_quantity.value = p.stock_quantity ?? '';
   form.cover_image_url.value = p.cover_image_url || '';
+  if (p.cover_image_url) {
+    const pv = document.getElementById('preview-capa');
+    pv.style.backgroundImage = `url('${p.cover_image_url}')`;
+    pv.textContent = '';
+  }
   form.status.value = p.status;
+  if (p.currency_code) form.currency_code.value = p.currency_code;
 }
 
 form.addEventListener('submit', async (e) => {
@@ -164,7 +193,13 @@ form.addEventListener('submit', async (e) => {
   }
 });
 
-carregarCategorias().then(carregarParaEdicao);
+ligarSeletorDeImagem(
+  document.getElementById('file-capa'),
+  form.cover_image_url,
+  document.getElementById('preview-capa')
+);
+
+Promise.all([carregarCategorias(), carregarMoedas()]).then(carregarParaEdicao);
 </script>
 </body>
 </html>

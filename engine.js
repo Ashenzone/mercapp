@@ -1,10 +1,25 @@
 const { pool } = require('../db/pool');
 const { PERFIS, comentarioAleatorio } = require('./botProfiles');
 const { buscarTendenciasReais } = require('./trendsSource');
+const { fecharMes } = require('./economy');
+const {
+  botsPedemAfiliacao, botsPedemEmprego, afiliadosDivulgam, engajarPostsDoJogador,
+} = require('./social');
 
 const PLATFORM_FEE = 0.08; // 8% fica "fora" da economia (evita inflacao descontrolada)
-const BOTS_POR_TICK = 40;   // amostra de bots avaliados a cada ciclo (performance)
-const PRODUTOS_AVALIADOS_POR_BOT = 6; // quantos produtos cada bot compara por ciclo
+const BOTS_POR_TICK = 120;  // amostra de bots avaliados a cada ciclo
+const PRODUTOS_AVALIADOS_POR_BOT = 8; // quantos produtos cada bot compara por ciclo
+
+// --- dificuldade ---
+// vender ficou deliberadamente mais dificil: o score minimo pra um bot sequer
+// "descobrir" o produto subiu, e a chance de compra foi reduzida a um terco.
+const SCORE_MINIMO_DESCOBERTA = 26;
+const DIFICULDADE_COMPRA = 0.34;
+
+// --- relogio do jogo ---
+// 1 dia de jogo = 4 horas reais. 1 mes de jogo = 7 dias de jogo (28h reais).
+const HORAS_REAIS_POR_DIA_DE_JOGO = 4;
+const DIAS_POR_MES_DE_JOGO = 7;
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
@@ -119,7 +134,7 @@ async function processarCampanhas(client) {
 }
 
 // -------------------- 4. BOTS: DESCOBERTA, COMPRA E AVALIACAO --------------------
-async function pontuarProduto(bot, produto, tendenciaPop) {
+function pontuarProduto(bot, produto, tendenciaPop) {
   const perfil = PERFIS[bot.profile] || PERFIS.curioso;
   let score = 10;
 
@@ -159,8 +174,9 @@ async function pontuarProduto(bot, produto, tendenciaPop) {
 
 async function rodarBots(client) {
   const { rows: produtos } = await client.query(
-    `SELECT p.*, co.balance_cents AS company_balance
-     FROM products p JOIN companies co ON co.id = p.company_id
+    `SELECT p.id, p.company_id, p.category_id, p.price_cents, p.rating_avg,
+            p.rating_count, p.stock_quantity, p.created_at, p.currency_code
+     FROM products p
      WHERE p.status = 'active' AND (p.stock_quantity IS NULL OR p.stock_quantity > 0)`
   );
   if (produtos.length === 0) return { visitas: 0, compras: 0, avaliacoes: 0 };
@@ -170,81 +186,269 @@ async function rodarBots(client) {
 
   const { rows: bots } = await client.query('SELECT * FROM bots ORDER BY random() LIMIT $1', [BOTS_POR_TICK]);
 
-  let visitas = 0, compras = 0, avaliacoes = 0;
+  // bonus de desempenho por empresa: funcionarios contratados (skill + cargo)
+  // e moveis de escritorio aumentam levemente a chance de conversao.
+  const { rows: bonusRows } = await client.query(
+    `SELECT c.id,
+            COALESCE((SELECT SUM(j.skill) FROM job_applications j
+                      WHERE j.company_id = c.id AND j.status = 'contratado'), 0) AS skill_total,
+            COALESCE((SELECT SUM(f.productivity_pct) FROM owned_furniture o
+                      JOIN furniture_catalog f ON f.id = o.furniture_id
+                      WHERE o.company_id = c.id), 0) AS produtividade
+     FROM companies c`
+  );
+  const bonusPorEmpresa = new Map(
+    bonusRows.map((r) => [r.id, 1 + (Number(r.skill_total) / 1000) + (Number(r.produtividade) / 100)])
+  );
+
+  // cambio e imposto por moeda (produto vendido em moeda estrangeira)
+  const { rows: moedas } = await client.query('SELECT code, rate_to_brl, import_tax_pct, demand_factor FROM currencies');
+  const cambio = new Map(moedas.map((m) => [m.code, m]));
+
+  // OTIMIZACAO: em vez de rodar queries dentro do laco (uma por visita, uma por
+  // compra, uma por avaliacao), acumulamos tudo em memoria e gravamos em poucas
+  // queries em lote no final. Isso derruba o numero de idas ao banco por ciclo
+  // de centenas para menos de dez.
+  const viewsPorProduto = new Map();   // produto -> qtd de visitas
+  const pedidos = [];                  // {produtoId, companyId, botId, priceCents}
+  const avaliacoesPend = [];           // {produtoId, botId, rating, comentario}
 
   for (const bot of bots) {
-    // cada bot olha uma amostra de produtos (nao o marketplace inteiro)
-    const candidatos = [...produtos].sort(() => Math.random() - 0.5).slice(0, PRODUTOS_AVALIADOS_POR_BOT);
+    const candidatos = [];
+    for (let i = 0; i < PRODUTOS_AVALIADOS_POR_BOT; i++) {
+      candidatos.push(produtos[Math.floor(Math.random() * produtos.length)]);
+    }
 
     let melhor = null, melhorScore = -1;
     for (const p of candidatos) {
       const pop = popPorCategoria.get(p.category_id) || 20;
-      const score = await pontuarProduto(bot, p, pop);
+      const score = pontuarProduto(bot, p, pop);
       if (score > melhorScore) { melhorScore = score; melhor = p; }
     }
-    if (!melhor || melhorScore < 12) continue; // nao achou nada interessante o suficiente pra "descobrir"
+    if (!melhor || melhorScore < SCORE_MINIMO_DESCOBERTA) continue;
 
-    visitas++;
-    await client.query('UPDATE products SET views_count = views_count + 1 WHERE id = $1', [melhor.id]);
+    viewsPorProduto.set(melhor.id, (viewsPorProduto.get(melhor.id) || 0) + 1);
 
     const perfil = PERFIS[bot.profile] || PERFIS.curioso;
-    // score alto = mais exposto/relevante -> maior chance de compra (atraso natural: nem toda visita vira compra)
-    const probCompra = clamp(perfil.prob_compra_base * (melhorScore / 40), 0.01, 0.65);
+    const bonus = bonusPorEmpresa.get(melhor.company_id) || 1;
+    const moeda = cambio.get(melhor.currency_code) || { rate_to_brl: 1, import_tax_pct: 0, demand_factor: 1 };
+    const probCompra = clamp(
+      perfil.prob_compra_base * (melhorScore / 40) * DIFICULDADE_COMPRA * bonus * Number(moeda.demand_factor),
+      0.002, 0.28
+    );
     if (Math.random() > probCompra) continue;
-    if (melhor.price_cents / 100 > bot.budget_cents / 100) continue; // bot nao tem orcamento
 
-    // ---- efetiva a compra ----
-    const receitaLiquida = Math.round(melhor.price_cents * (1 - PLATFORM_FEE));
-    await client.query('BEGIN');
-    try {
-      const pedido = await client.query(
-        `INSERT INTO orders (product_id, company_id, bot_id, price_cents, source)
-         VALUES ($1,$2,$3,$4,'organico') RETURNING id`,
-        [melhor.id, melhor.company_id, bot.id, melhor.price_cents]
-      );
-      await client.query(
-        `UPDATE products SET sales_count = sales_count + 1,
-                stock_quantity = CASE WHEN stock_quantity IS NULL THEN NULL ELSE GREATEST(0, stock_quantity - 1) END
-         WHERE id = $1`,
-        [melhor.id]
-      );
-      await client.query('UPDATE companies SET balance_cents = balance_cents + $1 WHERE id = $2', [receitaLiquida, melhor.company_id]);
-      await client.query('COMMIT');
-      compras++;
+    // preco convertido pra BRL (o bot raciocina em BRL)
+    const precoBrl = Math.round(melhor.price_cents * Number(moeda.rate_to_brl));
+    if (precoBrl > bot.budget_cents) continue;
 
-      // ---- possivel avaliacao apos a compra ----
-      const probAvaliar = 0.5;
-      if (Math.random() < probAvaliar) {
-        const ratingBase = melhor.rating_count > 0 ? Number(melhor.rating_avg) : 3.5;
-        let rating = Math.round(clamp(ratingBase + (Math.random() - 0.5) * 2, 1, 5));
-        const comentario = comentarioAleatorio(rating);
+    // vender la fora paga imposto do mercado de destino
+    const imposto = Math.round(precoBrl * Number(moeda.import_tax_pct) / 100);
 
-        await client.query(
-          `INSERT INTO reviews (product_id, order_id, bot_id, rating, comment) VALUES ($1,$2,$3,$4,$5)`,
-          [melhor.id, pedido.rows[0].id, bot.id, rating, comentario]
-        );
-        await client.query(
-          `UPDATE products SET
-             rating_avg = ((rating_avg * rating_count) + $1) / (rating_count + 1),
-             rating_count = rating_count + 1
-           WHERE id = $2`,
-          [rating, melhor.id]
-        );
-        await client.query(
-          `UPDATE companies SET reputation = (
-             SELECT COALESCE(AVG(rating_avg), 0) FROM products WHERE company_id = $1 AND rating_count > 0
-           ) WHERE id = $1`,
-          [melhor.company_id]
-        );
-        avaliacoes++;
-      }
-    } catch (err) {
-      await client.query('ROLLBACK');
-      console.error('Erro ao processar compra do bot:', err.message);
+    pedidos.push({
+      produtoId: melhor.id,
+      companyId: melhor.company_id,
+      botId: bot.id,
+      priceCents: precoBrl,
+      moeda: melhor.currency_code || 'BRL',
+      impostoCents: imposto,
+    });
+
+    if (Math.random() < 0.5) {
+      const ratingBase = melhor.rating_count > 0 ? Number(melhor.rating_avg) : 3.5;
+      const rating = Math.round(clamp(ratingBase + (Math.random() - 0.5) * 2, 1, 5));
+      avaliacoesPend.push({
+        produtoId: melhor.id,
+        botId: bot.id,
+        rating,
+        comentario: comentarioAleatorio(rating),
+      });
     }
   }
 
-  return { visitas, compras, avaliacoes };
+  // ---------- gravacao em lote, numa transacao so ----------
+  await client.query('BEGIN');
+  try {
+    if (viewsPorProduto.size > 0) {
+      const ids = [...viewsPorProduto.keys()];
+      const qtds = ids.map((id) => viewsPorProduto.get(id));
+      await client.query(
+        `UPDATE products p SET views_count = p.views_count + v.qtd
+         FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::int[]) AS qtd) v
+         WHERE p.id = v.id`,
+        [ids, qtds]
+      );
+    }
+
+    if (pedidos.length > 0) {
+      await client.query(
+        `INSERT INTO orders (product_id, company_id, bot_id, price_cents, source, currency_code, tax_cents)
+         SELECT product_id, company_id, bot_id, price_cents, 'organico', currency_code, tax_cents
+         FROM unnest($1::uuid[], $2::uuid[], $3::int[], $4::int[], $5::varchar[], $6::int[])
+           AS t(product_id, company_id, bot_id, price_cents, currency_code, tax_cents)`,
+        [
+          pedidos.map((p) => p.produtoId),
+          pedidos.map((p) => p.companyId),
+          pedidos.map((p) => p.botId),
+          pedidos.map((p) => p.priceCents),
+          pedidos.map((p) => p.moeda),
+          pedidos.map((p) => p.impostoCents),
+        ]
+      );
+
+      // vendas por produto (contador + estoque)
+      const vendasPorProduto = new Map();
+      for (const p of pedidos) vendasPorProduto.set(p.produtoId, (vendasPorProduto.get(p.produtoId) || 0) + 1);
+      await client.query(
+        `UPDATE products p SET
+           sales_count = p.sales_count + v.qtd,
+           stock_quantity = CASE WHEN p.stock_quantity IS NULL THEN NULL
+                                 ELSE GREATEST(0, p.stock_quantity - v.qtd) END
+         FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::int[]) AS qtd) v
+         WHERE p.id = v.id`,
+        [[...vendasPorProduto.keys()], [...vendasPorProduto.values()]]
+      );
+
+      // receita liquida por empresa
+      const receitaPorEmpresa = new Map();
+      for (const p of pedidos) {
+        const liquido = Math.round(p.priceCents * (1 - PLATFORM_FEE)) - p.impostoCents;
+        receitaPorEmpresa.set(p.companyId, (receitaPorEmpresa.get(p.companyId) || 0) + liquido);
+      }
+      await client.query(
+        `UPDATE companies c SET balance_cents = c.balance_cents + v.valor
+         FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::bigint[]) AS valor) v
+         WHERE c.id = v.id`,
+        [[...receitaPorEmpresa.keys()], [...receitaPorEmpresa.values()]]
+      );
+    }
+
+    if (avaliacoesPend.length > 0) {
+      await client.query(
+        `INSERT INTO reviews (product_id, bot_id, rating, comment)
+         SELECT product_id, bot_id, rating, comment
+         FROM unnest($1::uuid[], $2::int[], $3::int[], $4::text[])
+           AS t(product_id, bot_id, rating, comment)`,
+        [
+          avaliacoesPend.map((a) => a.produtoId),
+          avaliacoesPend.map((a) => a.botId),
+          avaliacoesPend.map((a) => a.rating),
+          avaliacoesPend.map((a) => a.comentario),
+        ]
+      );
+
+      // recalcula media a partir da tabela de reviews (mais preciso que media incremental)
+      const produtosAvaliados = [...new Set(avaliacoesPend.map((a) => a.produtoId))];
+      await client.query(
+        `UPDATE products p SET
+           rating_avg = sub.media,
+           rating_count = sub.total
+         FROM (
+           SELECT product_id, AVG(rating)::numeric(3,2) AS media, COUNT(*)::int AS total
+           FROM reviews WHERE product_id = ANY($1::uuid[]) GROUP BY product_id
+         ) sub
+         WHERE p.id = sub.product_id`,
+        [produtosAvaliados]
+      );
+
+      await client.query(
+        `UPDATE companies c SET reputation = COALESCE(sub.media, 0)
+         FROM (
+           SELECT company_id, AVG(rating_avg) AS media FROM products
+           WHERE rating_count > 0 GROUP BY company_id
+         ) sub
+         WHERE c.id = sub.company_id`
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao gravar ciclo de bots:', err.message);
+    return { visitas: 0, compras: 0, avaliacoes: 0 };
+  }
+
+  return { visitas: viewsPorProduto.size, compras: pedidos.length, avaliacoes: avaliacoesPend.length };
+}
+
+// -------------------- RELOGIO DO JOGO --------------------
+// 1 dia de jogo = 4 horas reais; 1 mes de jogo = 7 dias de jogo.
+async function avancarRelogio(client) {
+  const { rows } = await client.query('SELECT game_day, game_month, last_day_advance FROM simulation_state WHERE id = true');
+  const estado = rows[0];
+  if (!estado) return null;
+
+  const ultima = estado.last_day_advance ? new Date(estado.last_day_advance).getTime() : 0;
+  const horas = (Date.now() - ultima) / 36e5;
+  if (ultima && horas < HORAS_REAIS_POR_DIA_DE_JOGO) return null; // ainda e o mesmo dia de jogo
+
+  let dia = estado.game_day + 1;
+  let mes = estado.game_month;
+  let virouMes = false;
+  if (dia > DIAS_POR_MES_DE_JOGO) { dia = 1; mes += 1; virouMes = true; }
+
+  await client.query(
+    'UPDATE simulation_state SET game_day = $1, game_month = $2, last_day_advance = now() WHERE id = true',
+    [dia, mes]
+  );
+  return { dia, mes, virouMes };
+}
+
+// -------------------- CONCORRENTES (EMPRESAS DE BOTS) --------------------
+const NOMES_PRODUTO = [
+  'Guia Definitivo', 'Metodo Pratico', 'Pack Completo', 'Masterclass',
+  'Kit Profissional', 'Formula', 'Blueprint', 'Manual Avancado',
+  'Curso Intensivo', 'Template Pro', 'Checklist', 'Sistema',
+];
+
+// cada estrategia define preco e ritmo de lancamento de forma diferente,
+// entao um concorrente pode se sair melhor que o outro conforme o mercado muda.
+const ESTRATEGIAS = {
+  agressiva: { chanceLancar: 0.30, precoMin: 1900,  precoMax: 6900,  margem: 0.55 },
+  premium:   { chanceLancar: 0.10, precoMin: 19900, precoMax: 59900, margem: 0.75 },
+  volume:    { chanceLancar: 0.40, precoMin: 900,   precoMax: 3900,  margem: 0.45 },
+  nicho:     { chanceLancar: 0.15, precoMin: 7900,  precoMax: 24900, margem: 0.65 },
+};
+
+async function concorrentesAgem(client) {
+  const { rows: empresas } = await client.query(
+    'SELECT id, name, strategy FROM companies WHERE is_bot = true'
+  );
+  if (empresas.length === 0) return;
+
+  // concorrente lanca produto no que esta em alta -- quem ler melhor a
+  // tendencia vende mais, igual ao jogador.
+  const { rows: tendencias } = await client.query(
+    'SELECT category_id, popularity FROM trends ORDER BY popularity DESC LIMIT 5'
+  );
+  if (tendencias.length === 0) return;
+
+  for (const empresa of empresas) {
+    const est = ESTRATEGIAS[empresa.strategy] || ESTRATEGIAS.volume;
+    if (Math.random() > est.chanceLancar) continue;
+
+    // limite de catalogo pra nao inflar o marketplace infinitamente
+    const { rows: cont } = await client.query(
+      "SELECT COUNT(*)::int AS total FROM products WHERE company_id = $1 AND status = 'active'",
+      [empresa.id]
+    );
+    if (cont[0].total >= 12) continue;
+
+    const tend = tendencias[Math.floor(Math.random() * tendencias.length)];
+    const { rows: cat } = await client.query('SELECT name FROM categories WHERE id = $1', [tend.category_id]);
+    const nomeCat = cat[0] ? cat[0].name : 'Geral';
+    const titulo = `${NOMES_PRODUTO[Math.floor(Math.random() * NOMES_PRODUTO.length)]} de ${nomeCat}`;
+    const preco = Math.round(est.precoMin + Math.random() * (est.precoMax - est.precoMin));
+    const custo = Math.round(preco * (1 - est.margem));
+
+    await client.query(
+      `INSERT INTO products (company_id, name, category_id, description, product_type,
+                             niche, price_cents, cost_cents, status)
+       VALUES ($1,$2,$3,$4,'curso',$5,$6,$7,'active')`,
+      [empresa.id, titulo, tend.category_id,
+       `Produto de ${nomeCat} lancado por ${empresa.name}.`, nomeCat.toLowerCase(), preco, custo]
+    );
+  }
 }
 
 // -------------------- ORQUESTRACAO --------------------
@@ -252,10 +456,27 @@ async function rodarCiclo() {
   const client = await pool.connect();
   let resultado = {};
   try {
+    const relogio = await avancarRelogio(client);
     await atualizarTendencias(client);
     await talvezGerarEvento(client);
+    await concorrentesAgem(client);
     await processarCampanhas(client);
     resultado = await rodarBots(client);
+
+    // camada social: pedidos de afiliacao/emprego, divulgacao e engajamento
+    await botsPedemAfiliacao(client);
+    await botsPedemEmprego(client);
+    resultado.afiliados = await afiliadosDivulgam(client);
+    await engajarPostsDoJogador(client);
+
+    if (relogio) {
+      resultado.relogio = relogio;
+      // virou o mes no jogo -> gera contas, folha e impostos
+      if (relogio.virouMes) {
+        await fecharMes(client, relogio.mes);
+        resultado.fechou_mes = relogio.mes;
+      }
+    }
     await client.query(
       `UPDATE simulation_state SET tick_count = tick_count + 1, last_tick = now() WHERE id = true`
     );
@@ -270,12 +491,12 @@ async function rodarCiclo() {
 }
 
 let intervalId = null;
-function iniciarLoopDeSimulacao(intervaloMs = 20000) {
+function iniciarLoopDeSimulacao(intervaloMs = 3 * 60 * 60 * 1000) {
   if (intervalId) return;
   intervalId = setInterval(() => {
     rodarCiclo().catch((err) => console.error('Erro no ciclo de simulacao:', err));
   }, intervaloMs);
-  console.log(`Motor de simulacao rodando a cada ${intervaloMs / 1000}s.`);
+  console.log(`Motor de simulacao rodando a cada ${(intervaloMs / 3600000).toFixed(2)}h.`);
 }
 
 module.exports = { rodarCiclo, iniciarLoopDeSimulacao };

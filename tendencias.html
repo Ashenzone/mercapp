@@ -15,7 +15,6 @@
         <h1>Tendencias do Mercado</h1>
         <div class="sub">Assuntos em alta influenciam quais produtos os bots descobrem primeiro.</div>
       </div>
-      <button class="btn secondary" id="btn-tick">Forcar novo ciclo</button>
     </div>
 
     <div class="grid" id="grid"></div>
@@ -61,9 +60,6 @@ async function carregar() {
     : '<div class="empty">Nenhum evento ainda.</div>';
 }
 
-document.getElementById('btn-tick').addEventListener('click', async () => {
-  toast('Rodando ciclo de mercado...');
-  await fetch(`${API}/simulation/tick`, { method: 'POST' });
   toast('Ciclo concluido.');
   carregar();
 });

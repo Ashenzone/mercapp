@@ -15,8 +15,14 @@ router.get('/status', async (req, res) => {
   }
 });
 
-// POST /api/simulation/tick -> forca um ciclo agora (util para testar sem esperar o timer)
+// POST /api/simulation/tick -> forcar ciclo manualmente.
+// DESLIGADO por padrao: clicar num botao pra rodar ciclo virava dinheiro de
+// graca. O mercado agora anda sozinho a cada 3h (1 dia de jogo = 4h).
+// So funciona se DEV_ALLOW_MANUAL_TICK=true estiver configurado.
 router.post('/tick', async (req, res) => {
+  if (process.env.DEV_ALLOW_MANUAL_TICK !== 'true') {
+    return res.status(403).json({ erro: 'O mercado roda sozinho. Ciclo manual desativado.' });
+  }
   try {
     const resultado = await rodarCiclo();
     res.json({ ok: true, ...resultado });

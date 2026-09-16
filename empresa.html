@@ -29,8 +29,13 @@
         <textarea name="description"></textarea>
       </div>
       <div class="field full">
-        <label>Logo (URL)</label>
-        <input name="logo_url" type="url">
+        <label>Logo da empresa</label>
+        <div style="display:flex;gap:14px;align-items:center;">
+          <div id="preview-logo" class="cover" style="width:90px;height:90px;border-radius:8px;border:1px solid var(--line);background-size:cover;background-position:center;font-size:11px;">sem logo</div>
+          <input id="file-logo" type="file" accept="image/*">
+        </div>
+        <input name="logo_url" type="hidden">
+        <div class="hint">Escolha do seu computador ou da galeria do celular.</div>
       </div>
       <div class="form-actions">
         <button class="btn" type="submit">Salvar</button>
@@ -55,14 +60,41 @@ async function carregar() {
   form.name.value = empresa.name;
   form.description.value = empresa.description || '';
   form.logo_url.value = empresa.logo_url || '';
+  if (empresa.logo_url) {
+    const pv = document.getElementById('preview-logo');
+    pv.style.backgroundImage = `url('${empresa.logo_url}')`;
+    pv.textContent = '';
+  }
   document.getElementById('kpis').innerHTML =
     kpi('Saldo', formatarPreco(empresa.balance_cents)) +
     kpi('Reputacao', Number(empresa.reputation).toFixed(1) + ' / 5');
 }
 
-form.addEventListener('submit', (e) => {
+ligarSeletorDeImagem(
+  document.getElementById('file-logo'),
+  form.logo_url,
+  document.getElementById('preview-logo')
+);
+
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  toast('Edicao de empresa sera concluida quando o cadastro multiusuario existir (fase futura).');
+  const id = await garantirEmpresa();
+  const resp = await fetch(`${API}/companies/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: form.name.value,
+      description: form.description.value,
+      logo_url: form.logo_url.value || null,
+    }),
+  });
+  const dados = await resp.json();
+  if (resp.ok) {
+    toast('Empresa salva.');
+    atualizarSaldoSidebar();
+  } else {
+    toast(dados.erro || 'Erro ao salvar empresa.');
+  }
 });
 
 carregar();

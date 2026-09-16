@@ -4,40 +4,47 @@ Marketplace + motor de simulação econômica: marketing digital, produtos,
 tendências, bots consumidores, tráfego pago e analytics, tudo conectado
 (Node/Express/PostgreSQL).
 
-## O que já funciona
+## O que ja funciona
 
-**Marketplace e produtos**
-- Criar, editar e excluir produtos (e-book, curso, template, software, serviço, físico, digital, outro)
-- Marketplace com busca, filtro por categoria e ordenação (relevância, recentes, mais vendidos, preço)
-- Página individual de cada produto, "Meus Produtos", empresa com saldo inicial de R$ 5.000,00
+**Conta e marketplace**
+- Login por e-mail: cada jogador tem a propria empresa, ninguem mexe nos dados do outro
+- Criar/editar/excluir produtos, com upload de imagem do PC ou da galeria do celular
+- Marketplace com busca, filtro, ordenacao; jogador pode COMPRAR produto de outro jogador
+- 8 empresas concorrentes controladas por bots, cada uma com estrategia propria
+  (agressiva / premium / volume / nicho), que lancam produtos lendo as tendencias
 
-**Motor de simulação (roda sozinho em segundo plano, a cada ~20s)**
-- Tendências com ciclo de vida (sobem, atingem pico, caem, expiram e novas nascem), com histórico
-- Eventos de mercado aleatórios (viralização, queda de interesse, crise, evento global) que afetam categorias
-- 60 bots com 8 perfis de comportamento diferentes (curioso, econômico, impulsivo, exigente, fiel, caçador de
-  novidades, sensível a preço, influenciado por avaliações), cada um pontuando produtos por tendência, preço,
-  avaliação, fidelidade e novidade antes de "descobrir" (view) e, com atraso natural, comprar
-- Avaliações pós-compra geradas a partir do perfil do bot e do histórico de nota do produto, atualizando a
-  reputação da empresa
-- Integração opcional com tendência real (pageviews da Wikipédia) mapeada para as categorias do jogo, com
-  cache de 6h e fallback silencioso se a fonte externa falhar (ativa com `ENABLE_REAL_TRENDS=true`)
+**Motor de simulacao (roda sozinho, ciclo a cada 3h)**
+- Relogio do jogo: 1 dia = 4 horas reais, 1 mes = 7 dias de jogo (28h reais)
+- Tendencias com ciclo de vida, eventos de mercado, 60+ bots com 8 perfis de compra
+- Vendas deliberadamente dificeis: score minimo de descoberta e chance de compra reduzida
+- 75 variacoes de comentario nas avaliacoes
+- Gravacao em lote: o ciclo inteiro usa menos de 10 queries em vez de centenas
 
-**Marketing e resultados**
-- Tráfego pago: criar campanhas (orçamento, duração, público, região, objetivo), orçamento debitado na
-  criação e consumido aos poucos pelo motor de simulação (impressões → cliques → views)
-- Analytics por período (24h / 7d / 30d / 90d / tudo): vendas, receita, CPC, CTR, CPA, ROI e lucro por produto
-- Pedidos e Avaliações recebidos, Ranking (faturamento, produto mais vendido, melhor avaliação)
-- Página Economia explicando os mecanismos anti-inflação (taxa de 8% por venda, orçamento de campanha
-  debitado à vista, tendências que não duram para sempre, bots com orçamento limitado)
+**Rede social e afiliados**
+- MarketChat: feed, posts com imagem, curtidas, comentarios de bots e de jogadores
+- Bots pedem pra se afiliar aos seus produtos; voce aceita e negocia a comissao
+- Afiliado divulga no MarketChat, gera alcance/cliques e vende por comissao (voce so paga se vender)
+- Jogador tambem pode pedir afiliacao em produto de outro jogador
 
-## O que ainda é placeholder / próximos passos
+**Empresa, equipe e sociedade**
+- Cargos com salario, departamento e efeito na simulacao
+- Bots se candidatam a vagas (com habilidade 1-100 e pretensao salarial); voce contrata, aloca e demite
+- Funcionarios aumentam sua conversao de vendas e pesam na folha todo mes
+- Sociedade: pedir pra virar socio de outro jogador pelo e-mail, com % de participacao
 
-- Sem autenticação de usuário: a "empresa atual" fica salva no navegador (localStorage); a página Empresa
-  já mostra os dados mas a edição só é gravada quando o cadastro multiempresa for feito
-- A relevância do marketplace geral ainda é simplificada (vendas + avaliação); dá pra evoluir para incorporar
-  o score de tendência do motor de bots diretamente na ordenação
-- O botão "Forçar novo ciclo" nas páginas Dashboard/Tendências existe para você ver o motor funcionando sem
-  esperar o timer — em produção ele roda sozinho o tempo todo enquanto o servidor estiver de pé
+**Economia pesada**
+- Impostos reais simplificados: Simples Nacional por faixa, ICMS, ISS, IRPJ, INSS patronal
+- Venda em 5 moedas (BRL/USD/EUR/GBP/JPY): mais procura la fora, mas paga imposto de importacao
+- Casa (kitnet alugada ate casa propria) e 22 moveis com consumo de energia/agua,
+  conforto e bonus de produtividade
+- Fim de mes fecha a conta: aluguel, energia, agua, internet, salarios e impostos.
+  Nao pagou, fica atrasado.
+
+## Proximos passos possiveis
+
+- Senha no login (hoje e so e-mail, sem autenticacao real)
+- Socios aceitos ainda nao dividem o lucro automaticamente
+- Relevancia do marketplace pode incorporar o score de tendencia do motor de bots
 
 ## Como rodar localmente
 
