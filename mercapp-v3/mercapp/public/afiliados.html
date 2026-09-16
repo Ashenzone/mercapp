@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Afiliados · Mercapp</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1>Afiliados</h1>
+        <div class="sub">Bots e jogadores que querem divulgar seus produtos por comissao. Voce so paga se vender.</div>
+      </div>
+    </div>
+
+    <div class="section-title">Pedidos pendentes</div>
+    <div id="pendentes"></div>
+
+    <div class="section-title">Afiliados ativos</div>
+    <div id="ativos"></div>
+  </main>
+</div>
+
+<script src="js/sidebar.js"></script>
+<script src="js/app.js"></script>
+<script>
+function cardPedido(a) {
+  return `
+    <div class="card" style="margin-bottom:10px;">
+      <div class="body">
+        <div class="meta" style="border:none;padding:0;">
+          <strong>${a.afiliado_nome || 'Afiliado'}</strong>
+          <span class="badge">${a.tipo}</span>
+        </div>
+        <div class="stat">quer divulgar: <strong>${a.product_name}</strong></div>
+        <div style="display:flex;gap:18px;margin:8px 0;font-size:13px;">
+          <span>Alcance: <strong class="num">${a.reach}</strong></span>
+          <span>Comissao pedida: <strong class="num">${Number(a.commission_pct).toFixed(0)}%</strong></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input id="com-${a.id}" type="number" min="1" max="70" value="${Number(a.commission_pct).toFixed(0)}"
+                 style="width:90px;border:1px solid var(--line);border-radius:4px;padding:6px;font-size:13px;">
+          <button class="btn" style="padding:6px 12px;font-size:12px;" onclick="responder('${a.id}','ativo')">Aceitar</button>
+          <button class="btn danger" style="padding:6px 12px;font-size:12px;" onclick="responder('${a.id}','recusado')">Recusar</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function cardAtivo(a) {
+  return `
+    <div class="list-row">
+      <div>
+        <strong>${a.afiliado_nome || 'Afiliado'}</strong> — ${a.product_name}<br>
+        <span class="stat">${Number(a.commission_pct).toFixed(0)}% de comissao · ${a.sales_count} vendas geradas</span>
+      </div>
+      <div style="text-align:right;">
+        <div class="num">${formatarPreco(a.earned_cents)}</div>
+        <a href="#" style="font-size:12px;color:var(--down);" onclick="responder('${a.id}','encerrado');return false;">encerrar</a>
+      </div>
+    </div>`;
+}
+
+async function responder(id, status) {
+  const campo = document.getElementById(`com-${id}`);
+  const resp = await fetch(`${API}/social/afiliados/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, commission_pct: campo ? Number(campo.value) : undefined }),
+  });
+  if (resp.ok) { toast(status === 'ativo' ? 'Afiliado aceito!' : 'Atualizado.'); carregar(); }
+  else toast('Erro ao responder.');
+}
+
+async function carregar() {
+  const companyId = await garantirEmpresa();
+  const resp = await fetch(`${API}/social/afiliados/${companyId}`);
+  const lista = await resp.json();
+
+  const pend = lista.filter((a) => a.status === 'pendente');
+  const ativos = lista.filter((a) => a.status === 'ativo');
+
+  document.getElementById('pendentes').innerHTML = pend.length
+    ? pend.map(cardPedido).join('')
+    : '<div class="empty">Nenhum pedido agora. Produtos bem avaliados atraem mais afiliados.</div>';
+  document.getElementById('ativos').innerHTML = ativos.length
+    ? ativos.map(cardAtivo).join('')
+    : '<div class="empty">Voce ainda nao tem afiliados ativos.</div>';
+}
+carregar();
+</script>
+</body>
+</html>
